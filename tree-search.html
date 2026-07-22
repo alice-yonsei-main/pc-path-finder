@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Path Finder : tree -fi -a</title>
+<script async defer src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
+<script async defer src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
+<script>
+  // Early stubs: the async Google scripts may fire onload before the main
+  // script (at end of body) defines the real handlers. Queue the event and
+  // let the real handlers run once they exist.
+  window.__gapiPending = false; window.__gisPending = false;
+  window.gapiLoaded = function(){ window.__gapiPending = true; if (window.__realGapiLoaded) window.__realGapiLoaded(); };
+  window.gisLoaded  = function(){ window.__gisPending  = true; if (window.__realGisLoaded)  window.__realGisLoaded();  };
+</script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c232c;
+    --line: #2a323d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f6feb;
+    --folder: #d9a441;
+    --hit: #f0c674;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", "D2Coding", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.5;
+  }
+  .wrap {
+    width: 100%;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 28px 20px 80px;
+  }
+  header h1 {
+    font-size: 20px;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  header p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px;
+    margin-top: 20px;
+  }
+  .card h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 12px;
+    font-weight: 600;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  label.field { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 200px; }
+  label.field span { font-size: 12px; color: var(--muted); }
+  input[type="text"], textarea {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 9px 11px;
+    width: 100%;
+  }
+  input[type="text"]:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 2px rgba(31,111,235,0.25);
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  .btn {
+    background: var(--accent-dim);
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn:hover { background: var(--accent); }
+  .btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+  .btn.ghost:hover { border-color: var(--accent-dim); color: var(--text); }
+  .drop {
+    border: 1.5px dashed var(--line);
+    border-radius: 8px;
+    padding: 18px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop.drag { border-color: var(--accent); background: rgba(88,166,255,0.06); }
+  .status {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 10px;
+    font-family: var(--mono);
+  }
+  .status.ok { color: #3fb950; }
+  .status.err { color: #f85149; }
+  #searchBox { font-size: 15px; padding: 12px 14px; }
+  .opts { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .opts label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  .opts select {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+  .opts select:focus { outline: none; border-color: var(--accent-dim); }
+  .results { margin-top: 8px; }
+  .rescount { font-size: 12px; color: var(--muted); margin: 6px 2px 12px; font-family: var(--mono); }
+  .hitgroup { margin-bottom: 4px; }
+  .hit {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 7px;
+    font-family: var(--mono);
+    font-size: 13px;
+    border: 1px solid transparent;
+    flex-wrap: wrap;
+  }
+  .hit:hover { background: var(--panel-2); border-color: var(--line); }
+  .hit .name { color: var(--text); flex-shrink: 0; font-weight: 600; }
+  .hit .name .mk { color: var(--bg); background: var(--hit); border-radius: 2px; padding: 0 1px; }
+  .hit .path { color: var(--muted); word-break: break-all; flex: 1; }
+  .hit .path .folder { color: var(--folder); }
+  .hit .path .hosttag { color: var(--accent); font-weight: 600; margin-right: 4px; }
+  .hit .copy {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 5px;
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+    flex-shrink: 0;
+    font-family: var(--mono);
+  }
+  .hit .copy:hover { border-color: var(--accent-dim); color: var(--accent); }
+  .hit .copy.done { color: #3fb950; border-color: #238636; }
+  .hit .copy.fail { color: #f85149; border-color: #f85149; }
+  .hitrow { border-radius: 7px; }
+  .hit .gbtn {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 5px;
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+    flex-shrink: 0;
+    font-family: var(--mono);
+  }
+  .hit .gbtn i { font-style: normal; opacity: 0.8; }
+  .hit .gbtn:hover { border-color: var(--accent-dim); color: var(--accent); }
+  .hit .gbtn.active { color: var(--accent); border-color: var(--accent); background: rgba(88,166,255,0.08); }
+  .graphslot { padding: 0 6px; }
+  .graphslot:not(:empty) {
+    margin: 4px 6px 12px;
+    padding: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: auto;
+    max-height: 420px;
+  }
+  .graphslot svg { display: block; }
+  .empty { color: var(--muted); font-size: 13px; padding: 16px 2px; text-align: center; }
+  .loadmorebar { display: flex; justify-content: center; padding: 14px 2px; }
+  .btn.loadmore {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 8px 18px;
+  }
+  .btn.loadmore:hover { border-color: var(--accent-dim); background: rgba(88,166,255,0.08); }
+  .collapse-toggle { cursor: pointer; user-select: none; }
+  details.help { margin-top: 20px; }
+  details.help summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  details.help pre {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 12px;
+    overflow-x: auto;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .divider { height: 1px; background: var(--line); margin: 16px 0; border: none; }
+  .hide { display: none !important; }
+
+  @media (max-width: 640px) {
+    .wrap { padding: 18px 12px 60px; }
+    .card { padding: 12px; }
+    header h1 { font-size: 17px; }
+    #searchBox { font-size: 16px; }
+    .opts { gap: 10px; }
+    .hit .path { flex-basis: 100%; }
+  }
+  @media (min-width: 1400px) {
+    .wrap { max-width: 1200px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Path Finder : tree -fi -a</h1>
+    <p>Find a filename in <code>tree</code> output and get its absolute folder path.</p>
+  </header>
+
+  <!-- STEP 1: load tree -->
+  <div class="card" id="loadCard">
+    <h2>1 · Load tree file(s)</h2>
+    <div class="drop" id="drop">
+      Drag one or more <b>.out</b> files here (e.g. .out.0, .out.1 …), or click to choose
+      <input type="file" id="fileInput" accept=".out,.txt,text/plain" class="hide" multiple>
+    </div>
+    <div class="row" style="margin-top:10px; align-items:center; gap:10px;">
+      <button class="btn ghost" id="gdriveBtn" title="Load .out files from a Google Drive folder">🔗 Link (Google Drive)</button>
+      <span id="gdriveHint" style="font-size:12px; color:var(--muted);"></span>
+    </div>
+    <div style="margin:12px 0 4px; font-size:12px; color:var(--muted);">Or paste a single file's contents below</div>
+    <textarea id="pasteArea" placeholder=".&#10;├── PARAMS&#10;│   ├── ccdb&#10;..."></textarea>
+    <div class="row" style="margin-top:10px;">
+      <button class="btn" id="parseBtn">Parse</button>
+      <button class="btn ghost" id="clearBtn">Clear</button>
+    </div>
+    <div class="status" id="loadStatus"></div>
+  </div>
+
+  <!-- STEP 2: base path -->
+  <div class="card" id="baseCard">
+    <h2>2 · Base absolute path <span style="text-transform:none; font-weight:400;">(optional)</span></h2>
+    <label class="field">
+      <span>The absolute path where the tree root <code>.</code> actually lives. Leave blank to show relative paths.</span>
+      <input type="text" id="basePath" placeholder="e.g.  C:\Users\hong\project   or   /home/hong/project">
+    </label>
+  </div>
+
+  <!-- STEP 3: search -->
+  <div class="card hide" id="searchCard">
+    <h2>3 · Search</h2>
+    <input type="text" id="searchBox" placeholder="Enter a filename or partial word  (e.g. macro.C, .root, batch)">
+    <div id="searchModeHint" style="display:none; font-size:12px; color:var(--accent); margin-top:6px; font-family:var(--mono);"></div>
+    <div class="opts">
+      <label><input type="checkbox" id="optCase"> Case sensitive</label>
+      <label><input type="checkbox" id="optFolders"> Include folders in results</label>
+      <label><input type="checkbox" id="optExact"> Exact name match only</label>
+    </div>
+    <div class="opts" style="margin-top:6px;">
+      <label style="gap:8px;">Sort
+        <select id="sortBy">
+          <option value="path">Path (A–Z)</option>
+          <option value="name">Filename (A–Z)</option>
+          <option value="depth">Shortest path first</option>
+          <option value="orig">Original order</option>
+        </select>
+      </label>
+    </div>
+    <hr class="divider">
+    <div class="rescount" id="resCount"></div>
+    <div class="results" id="results"></div>
+  </div>
+
+  <details class="help">
+    <summary>How do I generate tree output?</summary>
+    <pre>Linux / macOS (recommended — most accurate parsing):
+    tree -fi -a > tree.out         # one full path per line
+
+Legacy tree format also supported:
+    tree -a > tree.out             # ├── └── indented format
+    tree /path/to/dir > tree.out   # a specific folder
+
+Windows (PowerShell or CMD):
+    tree /f > tree.out             # include files
+    (if garbled)  tree /f | Out-File tree.out -Encoding utf8
+
+This app supports the standard tree format (├── └── │).
+Windows tree (└─, ├─) is auto-detected too.</pre>
+  </details>
+</div>
+
+<script>
+"use strict";
+
+let nodes = []; // {name, parentPath, isFolder} — populated only in small-file mode
+let lastMatches = []; // currently displayed (sorted, sliced) result set
+let allMatches = [];  // full sorted result set for the current search (for pagination)
+let renderedCount = 0; // how many of allMatches are currently in the DOM
+const PAGE_SIZE = 2000; // results rendered per "show more" click
+let curQuery = "", curCaseSensitive = false; // remembered for highlighting on paginate
+
+// Lazy-scan state for large files:
+let allPaths = [];      // cleaned full path strings (flat), used when bigMode is on
+let allPathsSet = null; // Set of allPaths, for O(1) folder detection on demand
+let hostRanges = [];    // [{host, end}] — end = exclusive index into allPaths; maps a path index -> its source host
+let bigMode = false;    // true => don't fully parse; scan on Enter
+let currentHost = "";   // host label for small-file (single-file) mode
+// Files above this many bytes skip full parsing and use lazy scan.
+const BIG_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
+
+// Derive a host/name label from a filename like "pc3376_tree.out" or
+// "pc3376_tree.out.3" -> "pc3376". Falls back to the filename stem.
+function hostFromFilename(fname) {
+  let n = fname;
+  // strip trailing ".out", ".out.N", ".txt", ".txt.N"
+  n = n.replace(/\.(out|txt)(\.\d+)?$/i, "");
+  // strip a trailing "_tree" marker
+  n = n.replace(/_tree$/i, "");
+  return n || fname;
+}
+
+// Given an index into allPaths, return the host label for it.
+function hostForIndex(idx) {
+  // hostRanges is sorted by end; linear is fine (few files), but binary-search-safe:
+  let lo = 0, hi = hostRanges.length - 1, ans = hostRanges.length ? hostRanges[hostRanges.length-1].host : "";
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (idx < hostRanges[mid].end) { ans = hostRanges[mid].host; hi = mid - 1; }
+    else lo = mid + 1;
+  }
+  return ans;
+}
+
+const $ = id => document.getElementById(id);
+
+/* ================= Google Drive integration ================= */
+// ---- Fill these in after following GOOGLE_DRIVE_SETUP.md ----
+const GDRIVE_API_KEY   = "AIzaSyCHCaeisfEKMegnS_izGUXRhM3DbVvikY0";  // API key (A-4)
+const GDRIVE_CLIENT_ID = "110399583548-ldribrif19obudshdto4ru9db400je2n.apps.googleusercontent.com";  // OAuth client ID (A-5)
+const GDRIVE_APP_ID    = "110399583548";  // Project number (A-6)
+// ------------------------------------------------------------
+const GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+
+let gapiReady = false, gisReady = false, gdriveToken = null, gTokenClient = null;
+
+// Called by the api.js onload (via the early stub in <head>).
+function gapiLoaded() {
+  gapi.load("client:picker", async () => {
+    try { await gapi.client.load("https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"); } catch(e){}
+    gapiReady = true;
+  });
+}
+window.__realGapiLoaded = gapiLoaded;
+// Called by the GIS client onload (via the early stub in <head>).
+function gisLoaded() {
+  if (!GDRIVE_CLIENT_ID) { gisReady = false; return; }
+  gTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GDRIVE_CLIENT_ID,
+    scope: GDRIVE_SCOPE,
+    callback: "", // set per-request
+  });
+  gisReady = true;
+}
+window.__realGisLoaded = gisLoaded;
+// If the async scripts already fired before this code ran, run now.
+if (window.__gapiPending && typeof gapi !== "undefined") gapiLoaded();
+if (window.__gisPending && typeof google !== "undefined") gisLoaded();
+
+function gdriveConfigured() {
+  return GDRIVE_API_KEY && GDRIVE_CLIENT_ID && GDRIVE_APP_ID;
+}
+
+// Ensure we have a valid access token (prompts on first use).
+function gdriveEnsureToken() {
+  return new Promise((resolve, reject) => {
+    if (!gisReady || !gTokenClient) { reject(new Error("Google auth not ready. Check CLIENT_ID and that you opened the app via http://localhost.")); return; }
+    gTokenClient.callback = (resp) => {
+      if (resp && resp.error) { reject(new Error("Auth error: " + resp.error)); return; }
+      gdriveToken = resp.access_token;
+      gapi.client.setToken({ access_token: gdriveToken });
+      resolve(gdriveToken);
+    };
+    gTokenClient.requestAccessToken({ prompt: gdriveToken ? "" : "consent" });
+  });
+}
+
+// Open the Picker so the user selects a FOLDER; resolves with the folder id/name.
+function gdrivePickFolder() {
+  return new Promise((resolve, reject) => {
+    if (!gapiReady) { reject(new Error("Google Picker not loaded yet. Wait a moment and retry.")); return; }
+    const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+      .setSelectFolderEnabled(true)
+      .setMimeTypes("application/vnd.google-apps.folder")
+      .setParent("root");
+    const picker = new google.picker.PickerBuilder()
+      .enableFeature(google.picker.Feature.NAV_HIDDEN)
+      .setDeveloperKey(GDRIVE_API_KEY)
+      .setAppId(GDRIVE_APP_ID)
+      .setOAuthToken(gdriveToken)
+      .addView(view)
+      .setTitle("Select the folder containing your .out files")
+      .setCallback((data) => {
+        if (data.action === google.picker.Action.PICKED) {
+          const doc = data.docs[0];
+          resolve({ id: doc.id, name: doc.name });
+        } else if (data.action === google.picker.Action.CANCEL) {
+          reject(new Error("cancelled"));
+        }
+      })
+      .build();
+    picker.setVisible(true);
+  });
+}
+
+// List .out / .out.N files inside a folder (handles pagination).
+async function gdriveListOutFiles(folderId) {
+  const files = [];
+  let pageToken = null;
+  do {
+    const resp = await gapi.client.drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: "nextPageToken, files(id, name, size)",
+      pageSize: 1000,
+      pageToken: pageToken || undefined,
+    });
+    for (const f of (resp.result.files || [])) {
+      if (/\.(out|txt)(\.\d+)?$/i.test(f.name)) files.push(f);
+    }
+    pageToken = resp.result.nextPageToken;
+  } while (pageToken);
+  return files;
+}
+
+// Download one Drive file's text content.
+async function gdriveDownloadText(fileId) {
+  const resp = await gapi.client.drive.files.get({ fileId, alt: "media" });
+  // gapi returns the raw text in resp.body for alt=media
+  return resp.body;
+}
+
+// Main entry: authenticate, pick folder, load all .out files.
+async function gdriveLoadFolder() {
+  if (!gdriveConfigured()) {
+    setStatus("Google Drive isn't configured yet. Fill in API_KEY / CLIENT_ID / APP_ID (see GOOGLE_DRIVE_SETUP.md).", "err");
+    return;
+  }
+  try {
+    $("gdriveHint").textContent = "Authorizing…";
+    await gdriveEnsureToken();
+    $("gdriveHint").textContent = "Choose a folder…";
+    const folder = await gdrivePickFolder();
+    $("gdriveHint").textContent = `Reading folder “${folder.name}” …`;
+    const outFiles = await gdriveListOutFiles(folder.id);
+    if (outFiles.length === 0) {
+      setStatus(`No .out files found in “${folder.name}”.`, "err");
+      $("gdriveHint").textContent = "";
+      return;
+    }
+    // Sort naturally so chunks reassemble in order (name.out.0, .1, .2, .10 …).
+    outFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+
+    setStatus(`Downloading ${outFiles.length} file(s) from Drive …`, "");
+    // Download each file's text, wrap as {name, text, size} and hand to the loader.
+    const remoteFiles = [];
+    let done = 0;
+    for (const f of outFiles) {
+      const text = await gdriveDownloadText(f.id);
+      remoteFiles.push({ name: f.name, text, size: (f.size ? +f.size : text.length) });
+      done++;
+      $("gdriveHint").textContent = `Downloaded ${done}/${outFiles.length} …`;
+    }
+    $("gdriveHint").textContent = `Loaded ${outFiles.length} file(s) from “${folder.name}”.`;
+    loadFromTexts(remoteFiles, `Google Drive: ${folder.name}`);
+  } catch (err) {
+    if (err && err.message === "cancelled") { $("gdriveHint").textContent = ""; return; }
+    setStatus("Drive error: " + (err.message || err), "err");
+    $("gdriveHint").textContent = "";
+  }
+}
+
+/* ============================================================ */
+
+/* ---------- Parser ---------- */
+
+// Lightweight: extract cleaned full paths only (no node objects).
+// Used in big-file mode. Handles the flat (tree -fi) format, which is
+// what large scans use. Returns array of "a/b/c" strings.
+function extractFlatPaths(text) {
+  const lines = text.split("\n");
+  const paths = [];
+  for (let i = 0; i < lines.length; i++) {
+    let s = lines[i];
+    // fast trim of trailing \r
+    if (s.charCodeAt(s.length - 1) === 13) s = s.slice(0, -1);
+    if (!s) continue;
+    // skip root and summary lines
+    if (s === "." || s === "./") continue;
+    if (s.charCodeAt(0) >= 48 && s.charCodeAt(0) <= 57 && /^\d+\s+director/.test(s)) continue;
+    let p = s;
+    if (p.charCodeAt(0) === 46) { // starts with '.'
+      if (p.startsWith("./") || p.startsWith(".\\")) p = p.slice(2);
+    }
+    if (p.indexOf("\\") !== -1) p = p.replace(/\\/g, "/");
+    if (p) paths.push(p);
+  }
+  return paths;
+}
+
+// Auto-detect which tree format this is, then dispatch.
+function parseTree(text) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  // Flat format (tree -fi): most content lines start with "./" or are a bare "."
+  // Indented format: content lines contain connectors ├ └ │ or leading indentation.
+  let flatVotes = 0, treeVotes = 0;
+  for (const line of lines) {
+    const s = line.trim();
+    if (!s || s === "." || /^\d+\s+director/.test(s)) continue;
+    if (/[├└│]/.test(line)) { treeVotes++; continue; }
+    if (s.startsWith("./") || s.startsWith(".\\")) { flatVotes++; continue; }
+    // a bare word with no indentation and no connector -> lean flat
+    if (line === s) flatVotes++; else treeVotes++;
+  }
+  return flatVotes > treeVotes ? parseFlat(lines) : parseIndented(lines);
+}
+
+// tree -fi format: each line is a full relative path like "./PARAMS/ccdb/macro.C"
+function parseFlat(lines) {
+  const paths = [];
+  for (const line of lines) {
+    const s = line.trim();
+    if (!s || s === "." || /^\d+\s+director/.test(s)) continue;
+    let p = s;
+    if (p.startsWith("./") || p.startsWith(".\\")) p = p.slice(2);
+    p = p.replace(/\\/g, "/"); // normalize windows separators internally
+    if (p) paths.push(p);
+  }
+  // A path is a folder if it's a strict prefix (up to a separator) of another path.
+  const prefixes = new Set();
+  for (const p of paths) {
+    const parts = p.split("/");
+    for (let i = 1; i < parts.length; i++) prefixes.add(parts.slice(0, i).join("/"));
+  }
+  const out = [];
+  for (const p of paths) {
+    const parts = p.split("/");
+    const name = parts[parts.length - 1];
+    const parentPath = parts.slice(0, -1).join("/");
+    out.push({ name, parentPath, isFolder: prefixes.has(p) });
+  }
+  return out;
+}
+
+// Indented format: ├── └── │ connectors (unix tree, windows tree /f)
+function parseIndented(lines) {
+  const out = [];
+  // stack[depth] = name
+  const stack = {};
+  let rootSet = false;
+
+  // First pass: collect (depth, name)
+  const raw = [];
+  for (let line of lines) {
+    if (!line.trim()) continue;
+    // summary line "186 directories, 1307 files"
+    if (/^\s*\d+\s+director(y|ies)/.test(line)) continue;
+    // root "."
+    if (line.trim() === "." || line.trim() === "./") {
+      raw.push({ depth: -1, name: ".", root: true });
+      continue;
+    }
+    // match connector: ├── └── (unix)  or ├─ └─ (windows)  or +--- \---
+    const m = line.match(/([├└`|+\\][─-]{1,3}\s?|\\---|\+---)\s*(.+)$/);
+    let name, prefix;
+    if (m) {
+      prefix = line.slice(0, m.index);
+      name = m[2];
+    } else {
+      // maybe a windows top-level like "C:." or a plain indented name
+      const trimmed = line.replace(/^[\s│|]+/, "");
+      if (!trimmed) continue;
+      prefix = line.slice(0, line.length - trimmed.length);
+      name = trimmed;
+    }
+    // depth = indentation width / 4  (unix tree uses 4-char units)
+    // count leading structural width robustly
+    const indentWidth = prefix.replace(/\t/g, "    ").length;
+    const depth = Math.round(indentWidth / 4);
+    raw.push({ depth, name: name.trim(), root: false });
+  }
+
+  // Second pass: reconstruct paths + folder detection (has deeper child next)
+  for (let i = 0; i < raw.length; i++) {
+    const e = raw[i];
+    if (e.root) {
+      for (const k in stack) delete stack[k];
+      stack[-1] = ".";
+      continue;
+    }
+    stack[e.depth] = e.name;
+    for (const k in stack) { if (+k > e.depth) delete stack[k]; }
+    const depths = Object.keys(stack).map(Number).filter(d => d >= 0).sort((a,b)=>a-b);
+    const parts = depths.map(d => stack[d]);
+    const parentParts = parts.slice(0, -1);
+    const parentPath = parentParts.join("/");
+    // folder if next entry is deeper
+    let isFolder = false;
+    for (let j = i + 1; j < raw.length; j++) {
+      if (raw[j].root) break;
+      if (raw[j].depth > e.depth) { isFolder = true; break; }
+      if (raw[j].depth <= e.depth) break;
+    }
+    out.push({ name: e.name, parentPath, isFolder });
+  }
+  return out;
+}
+
+/* ---------- Load handlers ---------- */
+function doParse(text, source, byteSize) {
+  if (!text || !text.trim()) {
+    setStatus("Nothing to load.", "err");
+    return;
+  }
+  // Estimate size: prefer real byte size, else UTF-16 length is a rough proxy.
+  const size = byteSize || text.length;
+
+  try {
+    if (size >= BIG_FILE_BYTES) {
+      // ----- Big-file mode: lazy scan, no full parse -----
+      bigMode = true;
+      nodes = [];
+      const t0 = performance.now();
+      allPaths = extractFlatPaths(text.replace(/\r\n/g, "\n"));
+      allPathsSet = null; // built lazily on first folder check
+      const ms = Math.round(performance.now() - t0);
+      if (allPaths.length === 0) {
+        setStatus("No paths found. Check that the file is 'tree -fi' output.", "err");
+        $("searchCard").classList.add("hide");
+        return;
+      }
+      const mb = (size / 1024 / 1024).toFixed(0);
+      setStatus(`✓ ${source} — ${allPaths.length.toLocaleString()} paths (${mb} MB, large-file mode). Type a term and press Enter.`, "ok");
+      $("searchCard").classList.remove("hide");
+      $("searchBox").focus();
+      updateSearchModeHint();
+      // don't auto-search; wait for Enter
+      $("results").innerHTML = '<div class="empty">Type a term and press Enter to search.</div>';
+      $("resCount").textContent = "";
+    } else {
+      // ----- Small-file mode: full parse, live search -----
+      bigMode = false;
+      allPaths = []; allPathsSet = null;
+      nodes = parseTree(text);
+      const files = nodes.filter(n => !n.isFolder).length;
+      const folders = nodes.filter(n => n.isFolder).length;
+      if (nodes.length === 0) {
+        setStatus("No items parsed. Check that the tree format is correct.", "err");
+        $("searchCard").classList.add("hide");
+        return;
+      }
+      setStatus(`✓ ${source} — ${nodes.length} items total (${files} files, ${folders} folders)`, "ok");
+      $("searchCard").classList.remove("hide");
+      $("searchBox").focus();
+      updateSearchModeHint();
+      runSearch();
+    }
+  } catch (err) {
+    setStatus("Parse error: " + err.message, "err");
+  }
+}
+
+// Show/hide the live-vs-Enter hint under the search box.
+function updateSearchModeHint() {
+  const hint = $("searchModeHint");
+  if (!hint) return;
+  hint.textContent = bigMode
+    ? "Large file: press Enter to search (live search is off to stay fast)."
+    : "";
+  hint.style.display = bigMode ? "block" : "none";
+}
+
+function setStatus(msg, cls) {
+  const el = $("loadStatus");
+  el.textContent = msg;
+  el.className = "status" + (cls ? " " + cls : "");
+}
+
+$("parseBtn").addEventListener("click", () => { currentHost = ""; doParse($("pasteArea").value, "Pasted text"); });
+$("clearBtn").addEventListener("click", () => {
+  $("pasteArea").value = "";
+  nodes = []; allPaths = []; allPathsSet = null; bigMode = false; hostRanges = []; currentHost = "";
+  allMatches = []; lastMatches = []; renderedCount = 0;
+  $("searchCard").classList.add("hide");
+  updateSearchModeHint();
+  setStatus("");
+});
+
+const drop = $("drop"), fileInput = $("fileInput");
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("drag"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+drop.addEventListener("drop", e => {
+  e.preventDefault();
+  drop.classList.remove("drag");
+  if (e.dataTransfer.files.length) readFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener("change", e => { if (e.target.files.length) readFiles(e.target.files); });
+
+// Google Drive Link button
+const gdriveBtn = $("gdriveBtn");
+if (gdriveBtn) {
+  if (!gdriveConfigured()) {
+    $("gdriveHint").textContent = "Not configured — see GOOGLE_DRIVE_SETUP.md";
+  }
+  gdriveBtn.addEventListener("click", gdriveLoadFolder);
+}
+
+// Natural-sort filenames so chunks reassemble in order: name.out.0, .1, .2, .10 ...
+function sortChunkFiles(files) {
+  return [...files].sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+// Read one file as text (Promise).
+function readTextFile(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = ev => resolve(ev.target.result);
+    r.onerror = () => reject(new Error("Could not read " + file.name));
+    r.readAsText(file, "utf-8");
+  });
+}
+
+async function readFiles(fileList) {
+  const files = sortChunkFiles(fileList);
+  const items = files.map(f => ({ name: f.name, size: f.size, getText: () => readTextFile(f) }));
+  return loadItems(items);
+}
+
+// Drive path: items already have text in memory.
+function loadFromTexts(remoteFiles, sourceLabel) {
+  const items = remoteFiles
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }))
+    .map(rf => ({ name: rf.name, size: rf.size, getText: () => Promise.resolve(rf.text) }));
+  return loadItems(items, sourceLabel);
+}
+
+// Shared loader used by both local uploads and Google Drive.
+// items: [{ name, size, getText:()=>Promise<string> }]
+async function loadItems(items, sourceLabel) {
+  const totalBytes = items.reduce((s, f) => s + (f.size || 0), 0);
+  const names = items.map(f => f.name).join(", ");
+  const source = sourceLabel || (items.length === 1 ? items[0].name
+    : `${items.length} files (${names.length > 60 ? names.slice(0, 57) + "…" : names})`);
+
+  setStatus(`Reading ${items.length} file(s) …`, "");
+
+  try {
+    if (totalBytes >= BIG_FILE_BYTES || items.length > 1) {
+      // Big / multi-chunk mode: extract paths from each chunk separately and
+      // append, so we never build one giant string (avoids the ~512MB string cap).
+      bigMode = true;
+      nodes = [];
+      allPaths = [];
+      allPathsSet = null;
+      hostRanges = [];
+      currentHost = "";
+      const t0 = performance.now();
+      for (const f of items) {
+        const host = hostFromFilename(f.name);
+        const text = await f.getText();
+        const chunkPaths = extractFlatPaths(text.replace(/\r\n/g, "\n"));
+        for (let i = 0; i < chunkPaths.length; i++) allPaths.push(chunkPaths[i]);
+        // Merge with previous range if same host (consecutive chunks .0/.1/.2).
+        if (hostRanges.length && hostRanges[hostRanges.length - 1].host === host) {
+          hostRanges[hostRanges.length - 1].end = allPaths.length;
+        } else {
+          hostRanges.push({ host, end: allPaths.length });
+        }
+      }
+      const ms = Math.round(performance.now() - t0);
+      if (allPaths.length === 0) {
+        setStatus("No paths found. Check that the files are 'tree -fi' output.", "err");
+        $("searchCard").classList.add("hide");
+        return;
+      }
+      $("pasteArea").value = "";
+      $("pasteArea").placeholder = "(large file loaded directly — not shown here)";
+      const mb = (totalBytes / 1024 / 1024).toFixed(0);
+      setStatus(`✓ ${source} — ${allPaths.length.toLocaleString()} paths (${mb} MB, ${items.length} chunk(s), large-file mode). Type a term and press Enter.`, "ok");
+      $("searchCard").classList.remove("hide");
+      $("searchBox").focus();
+      updateSearchModeHint();
+      $("results").innerHTML = '<div class="empty">Type a term and press Enter to search.</div>';
+      $("resCount").textContent = "";
+    } else {
+      // Single small file: full parse, live search (original behavior).
+      currentHost = hostFromFilename(items[0].name);
+      const text = await items[0].getText();
+      $("pasteArea").value = text;
+      doParse(text, source, totalBytes);
+    }
+  } catch (err) {
+    setStatus(err.message || "Could not read the file(s).", "err");
+  }
+}
+
+/* ---------- Search ---------- */
+// Live search only fires in small-file mode. In big mode we search on Enter.
+["searchBox","optCase","optFolders","optExact","basePath","sortBy"].forEach(id => {
+  $(id).addEventListener("input", () => { if (!bigMode) runSearch(); });
+  $(id).addEventListener("change", () => { if (!bigMode) runSearch(); });
+});
+// Enter always triggers a search (needed for big mode; harmless in small mode).
+$("searchBox").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); runSearch(); }
+});
+
+function normBase() {
+  let b = $("basePath").value.trim();
+  if (!b) return "";
+  // strip a single trailing slash/backslash
+  return b.replace(/[\/\\]+$/, "");
+}
+
+function buildAbs(parentPath) {
+  const base = normBase();
+  if (!base) {
+    return parentPath === "" ? "." : parentPath;
+  }
+  const sep = base.includes("\\") ? "\\" : "/";
+  if (parentPath === "") return base;
+  const rel = parentPath.split("/").join(sep);
+  return base + sep + rel;
+}
+
+// Append a file/folder name to a folder path using the correct separator.
+function joinPath(folderPath, name) {
+  const base = normBase();
+  const sep = base.includes("\\") ? "\\" : "/";
+  if (folderPath === "." || folderPath === "") return name;
+  return folderPath + sep + name;
+}
+
+// Robust copy: works over file:// and non-secure contexts too.
+function copyToClipboard(text, btn) {
+  const flash = (ok) => {
+    if (ok) {
+      btn.textContent = "Copied";
+      btn.classList.add("done");
+      btn.classList.remove("fail");
+    } else {
+      btn.textContent = "Failed";
+      btn.classList.add("fail");
+      btn.classList.remove("done");
+    }
+    setTimeout(() => {
+      btn.textContent = "Copy";
+      btn.classList.remove("done", "fail");
+    }, 1200);
+  };
+
+  const legacyCopy = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.top = "-9999px";
+      ta.setAttribute("readonly", "");
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      flash(ok);
+    } catch (e) {
+      flash(false);
+    }
+  };
+
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => flash(true)).catch(legacyCopy);
+  } else {
+    legacyCopy();
+  }
+}
+
+function esc(s){ return s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function highlight(name, q, caseSensitive) {
+  if (!q) return esc(name);
+  const hay = caseSensitive ? name : name.toLowerCase();
+  const needle = caseSensitive ? q : q.toLowerCase();
+  let idx = hay.indexOf(needle);
+  if (idx < 0) return esc(name);
+  let res = "", last = 0;
+  while (idx >= 0) {
+    res += esc(name.slice(last, idx)) + '<span class="mk">' + esc(name.slice(idx, idx+q.length)) + '</span>';
+    last = idx + q.length;
+    idx = hay.indexOf(needle, last);
+  }
+  res += esc(name.slice(last));
+  return res;
+}
+
+function runSearch() {
+  const q = $("searchBox").value.trim();
+  const caseSensitive = $("optCase").checked;
+  const includeFolders = $("optFolders").checked;
+  const exact = $("optExact").checked;
+  const resEl = $("results");
+  const countEl = $("resCount");
+
+  const hasData = bigMode ? allPaths.length > 0 : nodes.length > 0;
+  if (!hasData) return;
+  if (!q) {
+    resEl.innerHTML = bigMode
+      ? '<div class="empty">Type a term and press Enter to search.</div>'
+      : '<div class="empty">Enter a search term.</div>';
+    countEl.textContent = "";
+    return;
+  }
+
+  const needle = caseSensitive ? q : q.toLowerCase();
+  let matches;
+
+  if (bigMode) {
+    // Lazy scan: walk the path strings, build match objects only for hits.
+    // Collect ALL matches (as lightweight objects); rendering is paginated.
+    const multiHost = hostRanges.length > 1;
+    matches = [];
+    for (let i = 0; i < allPaths.length; i++) {
+      const p = allPaths[i];
+      const slash = p.lastIndexOf("/");
+      const name = slash >= 0 ? p.slice(slash + 1) : p;
+      const hay = caseSensitive ? name : name.toLowerCase();
+      const hit = exact ? hay === needle : hay.indexOf(needle) !== -1;
+      if (hit) {
+        matches.push({
+          name,
+          parentPath: slash >= 0 ? p.slice(0, slash) : "",
+          isFolder: false,
+          _full: p,
+          host: multiHost ? hostForIndex(i) : (hostRanges.length ? hostRanges[0].host : "")
+        });
+      }
+    }
+    // Folders aren't distinguished in big mode (would need a prefix index);
+    // filename search rarely targets folders, so this is acceptable.
+  } else {
+    matches = nodes.filter(n => {
+      if (n.isFolder && !includeFolders) return false;
+      const name = caseSensitive ? n.name : n.name.toLowerCase();
+      return exact ? name === needle : name.includes(needle);
+    });
+  }
+
+  const sortBy = $("sortBy").value;
+  const relPath = n => n.parentPath ? n.parentPath + "/" + n.name : n.name;
+  if (sortBy === "path") {
+    matches.sort((a, b) => relPath(a).localeCompare(relPath(b), undefined, { numeric: true, sensitivity: "base" }));
+  } else if (sortBy === "name") {
+    matches.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
+      || relPath(a).localeCompare(relPath(b), undefined, { numeric: true }));
+  } else if (sortBy === "depth") {
+    const depth = n => n.parentPath ? n.parentPath.split("/").length : 0;
+    matches.sort((a, b) => depth(a) - depth(b)
+      || relPath(a).localeCompare(relPath(b), undefined, { numeric: true }));
+  }
+  // "orig" leaves the scan/filter order untouched.
+
+  countEl.textContent = matches.length.toLocaleString() + " result" + (matches.length === 1 ? "" : "s");
+
+  if (matches.length === 0) {
+    resEl.innerHTML = '<div class="empty">No matching items.</div>';
+    allMatches = []; lastMatches = []; renderedCount = 0;
+    return;
+  }
+
+  // Store full result set and render the first page.
+  allMatches = matches;
+  curQuery = q;
+  curCaseSensitive = caseSensitive;
+  renderedCount = 0;
+  resEl.innerHTML = "";
+  renderPage();
+}
+
+// Build a single result row element.
+function buildRow(n, globalIdx) {
+  const abs = buildAbs(n.parentPath);
+  const fullPath = joinPath(abs, n.name);
+
+  const row = document.createElement("div");
+  row.className = "hitrow";
+
+  const div = document.createElement("div");
+  div.className = "hit";
+  const nameHtml = highlight(n.name, curQuery, curCaseSensitive);
+  const folderTag = n.isFolder ? ' <span style="color:var(--folder);font-size:11px;">[folder]</span>' : '';
+  const rowHost = n.host || currentHost;
+  const hostTag = rowHost ? '<span class="hosttag">[' + esc(rowHost) + ']</span>' : '';
+  div.innerHTML =
+    '<span class="name">' + nameHtml + folderTag + '</span>' +
+    '<span class="path folder">' + hostTag + esc(abs) + '</span>' +
+    '<button class="gbtn" title="Show nearby results as a graph"><i>◈</i> near</button>' +
+    '<button class="gbtn" title="Show what is inside this file\'s folder"><i>▤</i> folder</button>' +
+    '<button class="copy">Copy</button>';
+
+  const [nearBtn, folderBtn] = div.querySelectorAll(".gbtn");
+  const copyBtn = div.querySelector(".copy");
+  copyBtn.addEventListener("click", () => copyToClipboard(fullPath, copyBtn));
+
+  const slot = document.createElement("div");
+  slot.className = "graphslot";
+
+  const toggle = (kind) => {
+    const already = slot.dataset.kind === kind && slot.innerHTML !== "";
+    document.querySelectorAll(".graphslot").forEach(s => { if (s !== slot) { s.innerHTML = ""; s.dataset.kind = ""; } });
+    document.querySelectorAll(".gbtn.active").forEach(b => b.classList.remove("active"));
+    if (already) { slot.innerHTML = ""; slot.dataset.kind = ""; return; }
+    slot.dataset.kind = kind;
+    if (kind === "near") { slot.innerHTML = renderNeighborGraph(globalIdx); nearBtn.classList.add("active"); }
+    else { slot.innerHTML = renderSiblingGraph(n); folderBtn.classList.add("active"); }
+  };
+  nearBtn.addEventListener("click", () => toggle("near"));
+  folderBtn.addEventListener("click", () => toggle("folder"));
+  div.querySelector(".name").style.cursor = "pointer";
+  div.querySelector(".name").addEventListener("click", () => toggle("near"));
+
+  row.appendChild(div);
+  row.appendChild(slot);
+  return row;
+}
+
+// Render the next PAGE_SIZE results, appending to the list.
+function renderPage() {
+  const resEl = $("results");
+  // Remove any existing "load more" bar before appending.
+  const oldBar = resEl.querySelector(".loadmorebar");
+  if (oldBar) oldBar.remove();
+
+  const start = renderedCount;
+  const end = Math.min(allMatches.length, start + PAGE_SIZE);
+  // lastMatches (used by the neighbor graph) tracks what's currently rendered.
+  const frag = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+    frag.appendChild(buildRow(allMatches[i], i));
+  }
+  resEl.appendChild(frag);
+  renderedCount = end;
+  lastMatches = allMatches.slice(0, renderedCount);
+
+  if (renderedCount < allMatches.length) {
+    const bar = document.createElement("div");
+    bar.className = "loadmorebar";
+    const remaining = allMatches.length - renderedCount;
+    const next = Math.min(PAGE_SIZE, remaining);
+    const btn = document.createElement("button");
+    btn.className = "btn loadmore";
+    btn.textContent = `Show next ${next.toLocaleString()}  (${remaining.toLocaleString()} more)`;
+    btn.addEventListener("click", renderPage);
+    bar.appendChild(btn);
+    resEl.appendChild(bar);
+  } else if (allMatches.length > PAGE_SIZE) {
+    const done = document.createElement("div");
+    done.className = "loadmorebar empty";
+    done.textContent = `All ${allMatches.length.toLocaleString()} results shown.`;
+    resEl.appendChild(done);
+  }
+}
+/* ---------- Graph rendering (style B: horizontal node-edge) ---------- */
+
+// Escape for SVG text
+function esvg(s){ return esc(s); }
+
+// Build a horizontal graph: one center node -> a fan of leaf nodes.
+// focusIdx marks which leaf (in leaves[]) is the clicked one.
+function buildGraph(centerLabel, centerSub, leaves, focusIdx, caption) {
+  const n = leaves.length;
+  const rowH = 30;
+  const topPad = 30, botPad = 34;
+  const height = topPad + n * rowH + botPad;
+  const cx = 150, cy = height / 2;      // center node
+  const leafX = 330;
+  const y0 = topPad + rowH / 2;
+
+  // Mono font at 12px ≈ 7.25px per char. Size leaf boxes to the full label (no clipping).
+  const charW = 7.25, padX = 12;
+  let maxLeafW = 120;
+  leaves.forEach(lf => {
+    const iconLen = lf.isFolder ? 2 : 0;
+    const w = (lf.name.length + iconLen) * charW + padX * 2;
+    if (w > maxLeafW) maxLeafW = w;
+  });
+  const leafW = Math.ceil(maxLeafW);
+  const svgW = leafX + leafW + 16;
+
+  let edges = "", boxes = "";
+  leaves.forEach((lf, i) => {
+    const ly = y0 + i * rowH;
+    const focused = i === focusIdx;
+    edges += `<path d="M${cx+70} ${cy} C ${leafX-40} ${cy}, ${leafX-40} ${ly}, ${leafX} ${ly}" fill="none" stroke="${focused ? 'var(--accent)' : 'var(--line)'}" stroke-width="${focused ? 1.4 : 0.7}"/>`;
+    const fill = focused ? 'var(--accent-dim)' : (lf.isFolder ? 'rgba(217,164,65,0.14)' : 'var(--panel-2)');
+    const stroke = focused ? 'var(--accent)' : 'var(--line)';
+    const txtColor = focused ? '#fff' : (lf.isFolder ? 'var(--folder)' : 'var(--text)');
+    const icon = lf.isFolder ? '▤ ' : '';
+    boxes += `<g><rect x="${leafX}" y="${ly-11}" width="${leafW}" height="22" rx="5" fill="${fill}" stroke="${stroke}" stroke-width="0.7"/>`
+      + `<text x="${leafX+padX}" y="${ly+4}" fill="${txtColor}" font-family="var(--mono)" font-size="12">${icon}${esvg(lf.name)}</text></g>`;
+  });
+
+  const centerH = centerSub ? 42 : 30;
+  const center =
+    `<rect x="${cx-70}" y="${cy-centerH/2}" width="140" height="${centerH}" rx="7" fill="rgba(217,164,65,0.14)" stroke="var(--folder)" stroke-width="0.8"/>`
+    + `<text x="${cx}" y="${centerSub ? cy-3 : cy+4}" text-anchor="middle" fill="var(--folder)" font-family="var(--mono)" font-size="12">▤ ${esvg(clip(centerLabel, 16))}</text>`
+    + (centerSub ? `<text x="${cx}" y="${cy+13}" text-anchor="middle" fill="var(--muted)" font-family="var(--mono)" font-size="10">${esvg(clip(centerSub, 20))}</text>` : "");
+
+  const cap = caption ? `<text x="12" y="${height-12}" fill="var(--muted)" font-family="var(--sans)" font-size="11">${esvg(caption)}</text>` : "";
+
+  return `<svg viewBox="0 0 ${svgW} ${height}" width="${svgW}" height="${height}">`
+    + edges + center + boxes + cap + `</svg>`;
+}
+
+function clip(s, max){ return s.length > max ? s.slice(0, max-1) + "…" : s; }
+
+// Neighbors in the sorted result list: 5 before + focus + 5 after.
+function renderNeighborGraph(idx) {
+  const win = 5;
+  const start = Math.max(0, idx - win);
+  const end = Math.min(lastMatches.length, idx + win + 1);
+  const slice = lastMatches.slice(start, end);
+  const focusIdx = idx - start;
+  const leaves = slice.map(m => ({
+    name: (m.parentPath ? m.parentPath + "/" : "") + m.name,
+    isFolder: m.isFolder
+  }));
+  const caption = `Nearby results in the sorted list (${start+1}–${end} of ${lastMatches.length})`;
+  return buildGraph("results", "sorted order", leaves, focusIdx, caption);
+}
+
+// Siblings inside the clicked file's own folder: show ALL items in that folder.
+function renderSiblingGraph(node) {
+  const parent = node.parentPath;
+  let sibs;
+  if (bigMode) {
+    // Scan allPaths for entries whose immediate parent is `parent`.
+    const prefix = parent === "" ? "" : parent + "/";
+    const plen = prefix.length;
+    sibs = [];
+    const seen = new Set();
+    const CAP = 400; // keep the graph from exploding on huge folders
+    for (let i = 0; i < allPaths.length && sibs.length < CAP; i++) {
+      const p = allPaths[i];
+      if (parent === "") {
+        if (p.indexOf("/") !== -1) continue; // top-level only
+        if (!seen.has(p)) { seen.add(p); sibs.push({ name: p, isFolder: false }); }
+      } else {
+        if (p.length <= plen || p.slice(0, plen) !== prefix) continue;
+        const rest = p.slice(plen);
+        if (rest.indexOf("/") !== -1) continue; // must be a direct child
+        if (!seen.has(rest)) { seen.add(rest); sibs.push({ name: rest, isFolder: false }); }
+      }
+    }
+  } else {
+    sibs = nodes.filter(x => x.parentPath === parent)
+               .map(x => ({ name: x.name, isFolder: x.isFolder }));
+  }
+  const focusIdx = sibs.findIndex(x => x.name === node.name);
+  const leaves = sibs;
+  const folderName = parent === "" ? "." : parent.split("/").pop();
+  const abs = buildAbs(parent);
+  const cap = bigMode && sibs.length >= 400 ? " (first 400)" : "";
+  const caption = `Inside ${abs}  ·  ${sibs.length} items${cap}`;
+  return buildGraph(folderName, `${sibs.length} items`, leaves, focusIdx, caption);
+}
+</script>
+</body>
+</html>
