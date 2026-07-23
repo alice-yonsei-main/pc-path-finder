@@ -276,8 +276,14 @@
     <div id="searchModeHint" style="display:none; font-size:12px; color:var(--accent); margin-top:6px; font-family:var(--mono);"></div>
     <div class="opts">
       <label><input type="checkbox" id="optCase"> Case sensitive</label>
-      <label><input type="checkbox" id="optFolders"> Include folders in results</label>
       <label><input type="checkbox" id="optExact"> Exact name match only</label>
+      <label style="gap:8px;" title="Folders are detected by whether a path is the parent of another path. Empty folders look identical to files in tree output and count as files.">Find
+        <select id="findType">
+          <option value="both">Files &amp; folders</option>
+          <option value="file">Files only</option>
+          <option value="dir">Folders only</option>
+        </select>
+      </label>
     </div>
     <div class="opts" style="margin-top:6px;">
       <label style="gap:8px;">Sort
@@ -351,7 +357,7 @@ let totalMatchCount = null; // exact total, only when "Count total matches" is o
 
 // Lazy-scan state for large files:
 let allPaths = [];      // cleaned full path strings (flat), used when bigMode is on
-let allPathsSet = null; // Set of allPaths, for O(1) folder detection on demand
+let parentSet = null;   // Set of paths that are a parent of some other path => folders
 let hostRanges = [];    // [{host, end}] — end = exclusive index into allPaths; maps a path index -> its source host
 let bigMode = false;    // true => don't fully parse; scan on Enter
 let currentHost = "";   // host label for small-file (single-file) mode
@@ -698,7 +704,7 @@ function doParse(text, source, byteSize) {
       nodes = [];
       const t0 = performance.now();
       allPaths = extractFlatPaths(text.replace(/\r\n/g, "\n"));
-      allPathsSet = null; // built lazily on first folder check
+      parentSet = null;
       const ms = Math.round(performance.now() - t0);
       if (allPaths.length === 0) {
         setStatus("No paths found. Check that the file is 'tree -fi' output.", "err");
@@ -716,7 +722,7 @@ function doParse(text, source, byteSize) {
     } else {
       // ----- Small-file mode: full parse, live search -----
       bigMode = false;
-      allPaths = []; allPathsSet = null;
+      allPaths = []; parentSet = null;
       nodes = parseTree(text);
       const files = nodes.filter(n => !n.isFolder).length;
       const folders = nodes.filter(n => n.isFolder).length;
@@ -755,7 +761,7 @@ function setStatus(msg, cls) {
 $("parseBtn").addEventListener("click", () => { currentHost = ""; doParse($("pasteArea").value, "Pasted text"); });
 $("clearBtn").addEventListener("click", () => {
   $("pasteArea").value = "";
-  nodes = []; allPaths = []; allPathsSet = null; bigMode = false; hostRanges = []; currentHost = "";
+  nodes = []; allPaths = []; parentSet = null; bigMode = false; hostRanges = []; currentHost = "";
   allMatches = []; lastMatches = []; renderedCount = 0;
   batches = []; batchIndex = -1; scanCursors = []; batchExhausted = false; totalMatchCount = null;
   hideBatchBar();
@@ -878,7 +884,7 @@ async function loadItems(items, sourceLabel) {
       bigMode = true;
       nodes = [];
       allPaths = [];
-      allPathsSet = null;
+      parentSet = null;
       hostRanges = [];
       currentHost = "";
       const t0 = performance.now();
@@ -923,7 +929,7 @@ async function loadItems(items, sourceLabel) {
 
 /* ---------- Search ---------- */
 // Live search only fires in small-file mode. In big mode we search on Enter.
-["searchBox","optCase","optFolders","optExact","basePath","sortBy","batchSize","optTotal"].forEach(id => {
+["searchBox","optCase","findType","optExact","basePath","sortBy","batchSize","optTotal"].forEach(id => {
   $(id).addEventListener("input", () => { if (!bigMode) runSearch(); });
   $(id).addEventListener("change", () => { if (!bigMode) runSearch(); });
 });
@@ -1070,11 +1076,12 @@ function runSearch() {
   } else {
     // Small-file mode: unchanged — filter everything at once.
     const caseSensitive = curCaseSensitive;
-    const includeFolders = $("optFolders").checked;
+    const findType = $("findType").value;
     const exact = $("optExact").checked;
     const needle = caseSensitive ? q : q.toLowerCase();
     const matches = nodes.filter(n => {
-      if (n.isFolder && !includeFolders) return false;
+      if (findType === "dir" && !n.isFolder) return false;
+      if (findType === "file" && n.isFolder) return false;
       const name = caseSensitive ? n.name : n.name.toLowerCase();
       return exact ? name === needle : name.includes(needle);
     });
@@ -1107,12 +1114,35 @@ function pathMatches(name) {
   return exact ? hay === needle : hay.indexOf(needle) !== -1;
 }
 
+// Folder detection for big mode. A path is a folder if some other path has it
+// as its parent directory. We only collect direct parents (not every prefix) —
+// that's equivalent and much cheaper: ~1.3s / +18MB for 4.6M paths.
+// Built lazily, only when the user actually filters by type.
+function ensureParentSet() {
+  if (parentSet) return parentSet;
+  parentSet = new Set();
+  for (let i = 0; i < allPaths.length; i++) {
+    const p = allPaths[i];
+    const slash = p.lastIndexOf("/");
+    if (slash > 0) parentSet.add(p.slice(0, slash));
+  }
+  return parentSet;
+}
+
+// Is this path a folder? (big mode)
+function isFolderPath(p) {
+  return ensureParentSet().has(p);
+}
+
 // Collect the next batch: up to `batchSize` matches from EACH host, resuming
 // from scanCursors. Returns { matches, cursors } (cursors = state AFTER this batch).
 function collectBatch() {
   const batchSize = Math.max(100, parseInt($("batchSize").value, 10) || 5000);
   const caseSensitive = $("optCase").checked;
   const exact = $("optExact").checked;
+  const findType = $("findType").value;           // "both" | "file" | "dir"
+  const needFolderInfo = findType !== "both";
+  if (needFolderInfo) ensureParentSet();          // build once, before the loop
   const needle = caseSensitive ? curQuery : curQuery.toLowerCase();
   const multiHost = hostRanges.length > 1;
   const matches = [];
@@ -1129,14 +1159,20 @@ function collectBatch() {
       const hay = caseSensitive ? name : name.toLowerCase();
       const hit = exact ? hay === needle : hay.indexOf(needle) !== -1;
       if (hit) {
-        matches.push({
-          name,
-          parentPath: slash >= 0 ? p.slice(0, slash) : "",
-          isFolder: false,
-          _full: p,
-          host: multiHost ? hostName : (hostRanges.length ? hostRanges[0].host : "")
-        });
-        taken++;
+        const isDir = needFolderInfo ? parentSet.has(p) : false;
+        const typeOk = findType === "both"
+          || (findType === "dir" && isDir)
+          || (findType === "file" && !isDir);
+        if (typeOk) {
+          matches.push({
+            name,
+            parentPath: slash >= 0 ? p.slice(0, slash) : "",
+            isFolder: isDir,
+            _full: p,
+            host: multiHost ? hostName : (hostRanges.length ? hostRanges[0].host : "")
+          });
+          taken++;
+        }
       }
       i++;
     }
@@ -1153,6 +1189,9 @@ function collectBatch() {
 function countAllMatches() {
   const caseSensitive = $("optCase").checked;
   const exact = $("optExact").checked;
+  const findType = $("findType").value;
+  const needFolderInfo = findType !== "both";
+  if (needFolderInfo) ensureParentSet();
   const needle = caseSensitive ? curQuery : curQuery.toLowerCase();
   let count = 0;
   for (let i = 0; i < allPaths.length; i++) {
@@ -1160,7 +1199,13 @@ function countAllMatches() {
     const slash = p.lastIndexOf("/");
     const name = slash >= 0 ? p.slice(slash + 1) : p;
     const hay = caseSensitive ? name : name.toLowerCase();
-    if (exact ? hay === needle : hay.indexOf(needle) !== -1) count++;
+    if (!(exact ? hay === needle : hay.indexOf(needle) !== -1)) continue;
+    if (needFolderInfo) {
+      const isDir = parentSet.has(p);
+      if (findType === "dir" && !isDir) continue;
+      if (findType === "file" && isDir) continue;
+    }
+    count++;
   }
   return count;
 }
@@ -1409,12 +1454,12 @@ function renderSiblingGraph(node) {
       const p = allPaths[i];
       if (parent === "") {
         if (p.indexOf("/") !== -1) continue; // top-level only
-        if (!seen.has(p)) { seen.add(p); sibs.push({ name: p, isFolder: false }); }
+        if (!seen.has(p)) { seen.add(p); sibs.push({ name: p, isFolder: parentSet ? parentSet.has(p) : false }); }
       } else {
         if (p.length <= plen || p.slice(0, plen) !== prefix) continue;
         const rest = p.slice(plen);
         if (rest.indexOf("/") !== -1) continue; // must be a direct child
-        if (!seen.has(rest)) { seen.add(rest); sibs.push({ name: rest, isFolder: false }); }
+        if (!seen.has(rest)) { seen.add(rest); sibs.push({ name: rest, isFolder: parentSet ? parentSet.has(p) : false }); }
       }
     }
   } else {
