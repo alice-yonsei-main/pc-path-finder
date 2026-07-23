@@ -99,6 +99,7 @@
   }
   .btn:hover { background: var(--accent); }
   .btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+  .btn.ghost.active { color: var(--accent); border-color: var(--accent); background: rgba(88,166,255,0.08); }
   .btn.ghost:hover { border-color: var(--accent-dim); color: var(--text); }
   .drop {
     border: 1.5px dashed var(--line);
@@ -290,6 +291,11 @@
     </div>
     <hr class="divider">
     <div class="rescount" id="resCount"></div>
+    <div id="tokenMapBar" style="display:none; margin:0 2px 10px;">
+      <button class="btn ghost" id="tokenMapBtn" style="font-size:12px; padding:6px 12px;">◈ Relatedness map</button>
+      <span style="font-size:11px; color:var(--muted); margin-left:8px;">Groups results by shared words in their names</span>
+    </div>
+    <div id="tokenMap" class="graphslot" style="margin:0 2px 12px;"></div>
     <div class="results" id="results"></div>
   </div>
 
@@ -319,6 +325,12 @@ let lastMatches = []; // currently displayed (sorted, sliced) result set
 let allMatches = [];  // full sorted result set for the current search (for pagination)
 let renderedCount = 0; // how many of allMatches are currently in the DOM
 const PAGE_SIZE = 2000; // results rendered per "show more" click
+// Upper bound on collected matches. Sorting is O(n log n) with expensive
+// locale compares — 500k results take ~6s and 2M take ~24s, which freezes
+// the tab. 50k sorts in well under a second and is far more than anyone
+// scrolls through; beyond this we tell the user to narrow the search.
+const MATCH_CAP = 50000;
+let matchesTruncated = false;
 let curQuery = "", curCaseSensitive = false; // remembered for highlighting on paginate
 
 // Lazy-scan state for large files:
@@ -454,10 +466,22 @@ async function gdriveListOutFiles(folderId) {
 }
 
 // Download one Drive file's text content.
+// NOTE: we use fetch() directly rather than gapi.client.drive.files.get().
+// gapi.client buffers the whole response and keeps it in several forms
+// (body, result, ...), which balloons memory and stalls on 100MB chunks.
+// A plain fetch streams into a single string and lets it be GC'd right after.
 async function gdriveDownloadText(fileId) {
-  const resp = await gapi.client.drive.files.get({ fileId, alt: "media" });
-  // gapi returns the raw text in resp.body for alt=media
-  return resp.body;
+  const url = "https://www.googleapis.com/drive/v3/files/"
+            + encodeURIComponent(fileId) + "?alt=media";
+  const resp = await fetch(url, {
+    headers: { Authorization: "Bearer " + gdriveToken },
+  });
+  if (!resp.ok) {
+    let detail = "";
+    try { detail = " — " + (await resp.text()).slice(0, 200); } catch (e) {}
+    throw new Error(`Download failed (HTTP ${resp.status})${detail}`);
+  }
+  return await resp.text();
 }
 
 // Main entry: authenticate, pick folder, load all .out files.
@@ -481,18 +505,24 @@ async function gdriveLoadFolder() {
     // Sort naturally so chunks reassemble in order (name.out.0, .1, .2, .10 …).
     outFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
 
-    setStatus(`Downloading ${outFiles.length} file(s) from Drive …`, "");
-    // Download each file's text, wrap as {name, text, size} and hand to the loader.
-    const remoteFiles = [];
+    setStatus(`Loading ${outFiles.length} file(s) from Drive …`, "");
+    // IMPORTANT: download lazily, one chunk at a time. Downloading everything
+    // up front would hold all chunks (potentially hundreds of MB) in memory
+    // simultaneously — the exact thing chunking is meant to avoid. loadItems()
+    // calls getText() per file and lets each text be GC'd right after parsing.
     let done = 0;
-    for (const f of outFiles) {
-      const text = await gdriveDownloadText(f.id);
-      remoteFiles.push({ name: f.name, text, size: (f.size ? +f.size : text.length) });
-      done++;
-      $("gdriveHint").textContent = `Downloaded ${done}/${outFiles.length} …`;
-    }
+    const items = outFiles.map(f => ({
+      name: f.name,
+      size: f.size ? +f.size : 0,
+      getText: async () => {
+        $("gdriveHint").textContent = `Downloading ${done + 1}/${outFiles.length}: ${f.name} …`;
+        const text = await gdriveDownloadText(f.id);
+        done++;
+        return text;
+      },
+    }));
+    await loadItems(items, `Google Drive: ${folder.name}`);
     $("gdriveHint").textContent = `Loaded ${outFiles.length} file(s) from “${folder.name}”.`;
-    loadFromTexts(remoteFiles, `Google Drive: ${folder.name}`);
   } catch (err) {
     if (err && err.message === "cancelled") { $("gdriveHint").textContent = ""; return; }
     setStatus("Drive error: " + (err.message || err), "err");
@@ -736,6 +766,19 @@ if (gdriveBtn) {
   gdriveBtn.addEventListener("click", gdriveLoadFolder);
 }
 
+// Relatedness map toggle
+$("tokenMapBtn").addEventListener("click", () => {
+  const slot = $("tokenMap");
+  const btn = $("tokenMapBtn");
+  if (slot.innerHTML !== "") {
+    slot.innerHTML = "";
+    btn.classList.remove("active");
+  } else {
+    slot.innerHTML = renderTokenMap();
+    btn.classList.add("active");
+  }
+});
+
 // Natural-sort filenames so chunks reassemble in order: name.out.0, .1, .2, .10 ...
 function sortChunkFiles(files) {
   return [...files].sort((a, b) =>
@@ -771,6 +814,10 @@ function loadFromTexts(remoteFiles, sourceLabel) {
 // items: [{ name, size, getText:()=>Promise<string> }]
 async function loadItems(items, sourceLabel) {
   const totalBytes = items.reduce((s, f) => s + (f.size || 0), 0);
+  // Drive may not report a size. If any size is unknown we can't safely assume
+  // the file is small, so fall back to big-file mode (lazy scan) — it handles
+  // small inputs fine, whereas full parsing a huge file would freeze the tab.
+  const unknownSize = items.some(f => !f.size);
   const names = items.map(f => f.name).join(", ");
   const source = sourceLabel || (items.length === 1 ? items[0].name
     : `${items.length} files (${names.length > 60 ? names.slice(0, 57) + "…" : names})`);
@@ -778,7 +825,7 @@ async function loadItems(items, sourceLabel) {
   setStatus(`Reading ${items.length} file(s) …`, "");
 
   try {
-    if (totalBytes >= BIG_FILE_BYTES || items.length > 1) {
+    if (totalBytes >= BIG_FILE_BYTES || items.length > 1 || unknownSize) {
       // Big / multi-chunk mode: extract paths from each chunk separately and
       // append, so we never build one giant string (avoids the ~512MB string cap).
       bigMode = true;
@@ -808,8 +855,8 @@ async function loadItems(items, sourceLabel) {
       }
       $("pasteArea").value = "";
       $("pasteArea").placeholder = "(large file loaded directly — not shown here)";
-      const mb = (totalBytes / 1024 / 1024).toFixed(0);
-      setStatus(`✓ ${source} — ${allPaths.length.toLocaleString()} paths (${mb} MB, ${items.length} chunk(s), large-file mode). Type a term and press Enter.`, "ok");
+      const sizeNote = totalBytes > 0 ? `${(totalBytes / 1024 / 1024).toFixed(0)} MB, ` : "";
+      setStatus(`✓ ${source} — ${allPaths.length.toLocaleString()} paths (${sizeNote}${items.length} chunk(s), large-file mode). Type a term and press Enter.`, "ok");
       $("searchCard").classList.remove("hide");
       $("searchBox").focus();
       updateSearchModeHint();
@@ -945,6 +992,7 @@ function runSearch() {
 
   const needle = caseSensitive ? q : q.toLowerCase();
   let matches;
+  matchesTruncated = false;
 
   if (bigMode) {
     // Lazy scan: walk the path strings, build match objects only for hits.
@@ -965,6 +1013,10 @@ function runSearch() {
           _full: p,
           host: multiHost ? hostForIndex(i) : (hostRanges.length ? hostRanges[0].host : "")
         });
+        // Safety cap: sorting hundreds of thousands of results freezes the
+        // browser for many seconds (localeCompare is expensive). Nobody scrolls
+        // past this many anyway — narrow the query instead.
+        if (matches.length >= MATCH_CAP) { matchesTruncated = true; break; }
       }
     }
     // Folders aren't distinguished in big mode (would need a prefix index);
@@ -991,11 +1043,14 @@ function runSearch() {
   }
   // "orig" leaves the scan/filter order untouched.
 
-  countEl.textContent = matches.length.toLocaleString() + " result" + (matches.length === 1 ? "" : "s");
+  countEl.textContent = matches.length.toLocaleString() + " result" + (matches.length === 1 ? "" : "s")
+    + (matchesTruncated ? ` (stopped at ${MATCH_CAP.toLocaleString()} — narrow your search for the full set)` : "");
 
   if (matches.length === 0) {
     resEl.innerHTML = '<div class="empty">No matching items.</div>';
     allMatches = []; lastMatches = []; renderedCount = 0;
+    $("tokenMapBar").style.display = "none";
+    $("tokenMap").innerHTML = "";
     return;
   }
 
@@ -1005,6 +1060,10 @@ function runSearch() {
   curCaseSensitive = caseSensitive;
   renderedCount = 0;
   resEl.innerHTML = "";
+  // Reset the relatedness map for the new result set.
+  $("tokenMap").innerHTML = "";
+  $("tokenMapBtn").classList.remove("active");
+  $("tokenMapBar").style.display = matches.length >= 2 ? "block" : "none";
   renderPage();
 }
 
@@ -1194,6 +1253,114 @@ function renderSiblingGraph(node) {
   const cap = bigMode && sibs.length >= 400 ? " (first 400)" : "";
   const caption = `Inside ${abs}  ·  ${sibs.length} items${cap}`;
   return buildGraph(folderName, `${sibs.length} items`, leaves, focusIdx, caption);
+}
+
+/* ---------- Relatedness map: group results by shared name tokens ---------- */
+
+// Split a filename into meaningful tokens (words), dropping the extension,
+// pure numbers, and very short fragments.
+function tokenize(name) {
+  const stem = name.replace(/\.[^.]+$/, "");       // drop extension
+  const raw = stem.split(/[_\-.\s]+|(?<=\D)(?=\d)|(?<=\d)(?=\D)/); // split on separators and digit/letter boundaries
+  const toks = [];
+  for (let t of raw) {
+    t = t.trim();
+    if (t.length < 3) continue;        // skip tiny fragments
+    if (/^\d+$/.test(t)) continue;     // skip pure numbers (they'd over-group)
+    toks.push(t.toLowerCase());
+  }
+  return toks;
+}
+
+// Build the relatedness map for the current search results (allMatches).
+// Light O(n): tokenize each name, group files under tokens shared by >=2 files.
+function renderTokenMap() {
+  const files = allMatches;
+  if (!files || files.length === 0) return '<div class="empty">No results to map.</div>';
+
+  // token -> Set of file indices (into files)
+  const tokenToFiles = new Map();
+  const CAP_FILES = 8000; // safety cap on how many results we scan
+  const scanN = Math.min(files.length, CAP_FILES);
+  for (let i = 0; i < scanN; i++) {
+    const toks = tokenize(files[i].name);
+    for (const t of toks) {
+      let s = tokenToFiles.get(t);
+      if (!s) { s = []; tokenToFiles.set(t, s); }
+      s.push(i);
+    }
+  }
+
+  // Keep only tokens shared by >=2 files; rank by how many files they group.
+  let groups = [];
+  for (const [tok, idxs] of tokenToFiles) {
+    if (idxs.length >= 2) groups.push({ tok, idxs });
+  }
+  if (groups.length === 0) {
+    return '<div class="empty">No shared words found among these result names.</div>';
+  }
+  groups.sort((a, b) => b.idxs.length - a.idxs.length);
+
+  // Limit what we draw so the SVG stays readable.
+  const MAX_HUBS = 12;          // top N tokens
+  const MAX_FILES_PER_HUB = 10; // files shown per token
+  groups = groups.slice(0, MAX_HUBS);
+
+  // Layout: hubs in a left column, their files fanned to the right.
+  const hubX = 160, fileX = 380;
+  const rowH = 24, hubGap = 20;
+  const padTop = 28;
+  let y = padTop;
+  let edges = "", hubs = "", fileBoxes = "";
+  const charW = 7.0, padX = 10;
+  let maxFileW = 160;
+
+  // First pass: compute file box widths and positions.
+  const layout = [];
+  for (const g of groups) {
+    const shown = g.idxs.slice(0, MAX_FILES_PER_HUB);
+    const blockH = Math.max(rowH, shown.length * rowH);
+    const hubCy = y + blockH / 2;
+    const fileYs = shown.map((fi, k) => y + rowH / 2 + k * rowH);
+    layout.push({ g, shown, hubCy, fileYs });
+    shown.forEach(fi => {
+      const w = files[fi].name.length * charW + padX * 2;
+      if (w > maxFileW) maxFileW = w;
+    });
+    y += blockH + hubGap;
+  }
+  const height = y + 10;
+  const fileW = Math.ceil(maxFileW);
+  const svgW = fileX + fileW + 16;
+
+  // Second pass: draw.
+  for (const L of layout) {
+    const { g, shown, hubCy, fileYs } = L;
+    // edges hub -> each file
+    shown.forEach((fi, k) => {
+      const fy = fileYs[k];
+      edges += `<path d="M${hubX+72} ${hubCy} C ${fileX-40} ${hubCy}, ${fileX-40} ${fy}, ${fileX} ${fy}" fill="none" stroke="var(--line)" stroke-width="0.7"/>`;
+    });
+    // hub node (the shared token)
+    const hubW = Math.max(90, g.tok.length * 7.5 + 30);
+    hubs += `<g><rect x="${hubX-hubW/2}" y="${hubCy-13}" width="${hubW}" height="26" rx="7" fill="rgba(88,166,255,0.14)" stroke="var(--accent)" stroke-width="0.9"/>`
+      + `<text x="${hubX}" y="${hubCy+4}" text-anchor="middle" fill="var(--accent)" font-family="var(--mono)" font-size="12" font-weight="600">${esvg(g.tok)}</text>`
+      + `<text x="${hubX}" y="${hubCy+22}" text-anchor="middle" fill="var(--muted)" font-family="var(--mono)" font-size="9">${g.idxs.length} files</text></g>`;
+    // file boxes
+    shown.forEach((fi, k) => {
+      const fy = fileYs[k];
+      fileBoxes += `<g><rect x="${fileX}" y="${fy-10}" width="${fileW}" height="20" rx="5" fill="var(--panel-2)" stroke="var(--line)" stroke-width="0.7"/>`
+        + `<text x="${fileX+padX}" y="${fy+4}" fill="var(--text)" font-family="var(--mono)" font-size="11">${esvg(files[fi].name)}</text></g>`;
+    });
+  }
+
+  const note = groups.length >= MAX_HUBS
+    ? `Top ${MAX_HUBS} shared words (of ${tokenToFiles.size}). Up to ${MAX_FILES_PER_HUB} files each.`
+    : `${groups.length} shared word group(s). Up to ${MAX_FILES_PER_HUB} files each.`;
+  const cap = `<text x="12" y="18" fill="var(--muted)" font-family="var(--sans)" font-size="11">${esvg(note)}</text>`;
+
+  return `<svg viewBox="0 0 ${svgW} ${height}" width="${svgW}" height="${height}">`
+    + cap + edges + hubs + fileBoxes + `</svg>`;
 }
 </script>
 </body>
