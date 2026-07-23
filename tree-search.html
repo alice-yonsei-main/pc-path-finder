@@ -288,6 +288,11 @@
           <option value="orig">Original order</option>
         </select>
       </label>
+      <label style="gap:8px;" title="How many results to collect from EACH host per batch. With 2 hosts and 5000, one batch holds up to 10,000.">Batch per host
+        <input type="number" id="batchSize" value="5000" min="100" step="500"
+               style="width:90px; background:var(--panel-2); border:1px solid var(--line); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:12px; padding:4px 8px;">
+      </label>
+      <label title="Scan everything once to report the exact total. Slower on huge datasets."><input type="checkbox" id="optTotal"> Count total matches</label>
     </div>
     <hr class="divider">
     <div class="rescount" id="resCount"></div>
@@ -297,6 +302,11 @@
     </div>
     <div id="tokenMap" class="graphslot" style="margin:0 2px 12px;"></div>
     <div class="results" id="results"></div>
+    <div id="batchBar" style="display:none; align-items:center; justify-content:center; gap:12px; padding:14px 2px; border-top:1px solid var(--line); margin-top:8px;">
+      <button class="btn ghost" id="batchPrev" style="font-family:var(--mono); font-size:12px;">← Previous batch</button>
+      <span id="batchLabel" style="font-size:12px; color:var(--muted); font-family:var(--mono);"></span>
+      <button class="btn ghost" id="batchNext" style="font-family:var(--mono); font-size:12px;">Continue search →</button>
+    </div>
   </div>
 
   <details class="help">
@@ -329,6 +339,15 @@ const PAGE_SIZE = 2000; // results rendered per "show more" click
 // plain string compare, which is ~30x faster than per-comparison localeCompare
 // (2M results: ~3s instead of ~153s). Rendering stays paginated regardless.
 let curQuery = "", curCaseSensitive = false; // remembered for highlighting on paginate
+
+// ---- Batch search state (big mode) ----
+// Results are collected in batches: up to `batchSize` matches from EACH host.
+// Each batch is kept so the user can page back and forth without re-scanning.
+let batches = [];        // [ {matches:[...], cursors:[...]} ] — one entry per collected batch
+let batchIndex = -1;     // which batch is currently displayed
+let scanCursors = [];    // per-host scan position: index into allPaths where the next batch resumes
+let batchExhausted = false; // true once every host has been fully scanned
+let totalMatchCount = null; // exact total, only when "Count total matches" is on
 
 // Lazy-scan state for large files:
 let allPaths = [];      // cleaned full path strings (flat), used when bigMode is on
@@ -738,6 +757,8 @@ $("clearBtn").addEventListener("click", () => {
   $("pasteArea").value = "";
   nodes = []; allPaths = []; allPathsSet = null; bigMode = false; hostRanges = []; currentHost = "";
   allMatches = []; lastMatches = []; renderedCount = 0;
+  batches = []; batchIndex = -1; scanCursors = []; batchExhausted = false; totalMatchCount = null;
+  hideBatchBar();
   $("searchCard").classList.add("hide");
   updateSearchModeHint();
   setStatus("");
@@ -774,6 +795,35 @@ $("tokenMapBtn").addEventListener("click", () => {
     slot.innerHTML = renderTokenMap();
     btn.classList.add("active");
   }
+});
+
+// Batch navigation: go back to an already-collected batch, or continue scanning.
+$("batchPrev").addEventListener("click", () => {
+  if (batchIndex > 0) showBatch(batchIndex - 1);
+});
+$("batchNext").addEventListener("click", () => {
+  if (batchIndex < batches.length - 1) {
+    // A later batch is already collected — just switch to it.
+    showBatch(batchIndex + 1);
+    return;
+  }
+  if (batchExhausted) return;
+  const btn = $("batchNext");
+  const prevText = btn.textContent;
+  btn.disabled = true; btn.textContent = "Searching…";
+  // Let the button repaint before the (synchronous) scan starts.
+  setTimeout(() => {
+    const batch = collectBatch();
+    btn.textContent = prevText;
+    if (batch.matches.length === 0) {
+      // Nothing more found; mark the end and refresh the bar.
+      updateBatchBar();
+      $("batchLabel").textContent = `Batch ${batchIndex + 1} of ${batches.length} (no more matches)`;
+      return;
+    }
+    batches.push(batch);
+    showBatch(batches.length - 1);
+  }, 0);
 });
 
 // Natural-sort filenames so chunks reassemble in order: name.out.0, .1, .2, .10 ...
@@ -873,9 +923,17 @@ async function loadItems(items, sourceLabel) {
 
 /* ---------- Search ---------- */
 // Live search only fires in small-file mode. In big mode we search on Enter.
-["searchBox","optCase","optFolders","optExact","basePath","sortBy"].forEach(id => {
+["searchBox","optCase","optFolders","optExact","basePath","sortBy","batchSize","optTotal"].forEach(id => {
   $(id).addEventListener("input", () => { if (!bigMode) runSearch(); });
   $(id).addEventListener("change", () => { if (!bigMode) runSearch(); });
+});
+// In big mode, changing the sort order re-sorts the batch already on screen
+// (no need to rescan). Other option changes require a fresh Enter.
+$("sortBy").addEventListener("change", () => {
+  if (bigMode && batchIndex >= 0 && batches[batchIndex]) {
+    sortMatches(batches[batchIndex].matches);
+    showBatch(batchIndex);
+  }
 });
 // Enter always triggers a search (needed for big mode; harmless in small mode).
 $("searchBox").addEventListener("keydown", (e) => {
@@ -971,9 +1029,6 @@ function highlight(name, q, caseSensitive) {
 
 function runSearch() {
   const q = $("searchBox").value.trim();
-  const caseSensitive = $("optCase").checked;
-  const includeFolders = $("optFolders").checked;
-  const exact = $("optExact").checked;
   const resEl = $("results");
   const countEl = $("resCount");
 
@@ -984,18 +1039,90 @@ function runSearch() {
       ? '<div class="empty">Type a term and press Enter to search.</div>'
       : '<div class="empty">Enter a search term.</div>';
     countEl.textContent = "";
+    hideBatchBar();
     return;
   }
 
-  const needle = caseSensitive ? q : q.toLowerCase();
-  let matches;
+  curQuery = q;
+  curCaseSensitive = $("optCase").checked;
 
   if (bigMode) {
-    // Lazy scan: walk the path strings, build match objects only for hits.
-    // Collect ALL matches (as lightweight objects); rendering is paginated.
-    const multiHost = hostRanges.length > 1;
-    matches = [];
-    for (let i = 0; i < allPaths.length; i++) {
+    // Fresh batch search: reset cursors to each host's start.
+    batches = [];
+    batchIndex = -1;
+    batchExhausted = false;
+    totalMatchCount = null;
+    scanCursors = hostRanges.map((hr, i) => (i === 0 ? 0 : hostRanges[i - 1].end));
+
+    // Optional: exact total (requires a full scan of every path).
+    if ($("optTotal").checked) totalMatchCount = countAllMatches();
+
+    const batch = collectBatch();
+    if (batch.matches.length === 0) {
+      resEl.innerHTML = '<div class="empty">No matching items.</div>';
+      countEl.textContent = totalMatchCount !== null ? "0 results" : "";
+      allMatches = []; lastMatches = []; renderedCount = 0;
+      hideBatchBar();
+      return;
+    }
+    batches.push(batch);
+    showBatch(0);
+  } else {
+    // Small-file mode: unchanged — filter everything at once.
+    const caseSensitive = curCaseSensitive;
+    const includeFolders = $("optFolders").checked;
+    const exact = $("optExact").checked;
+    const needle = caseSensitive ? q : q.toLowerCase();
+    const matches = nodes.filter(n => {
+      if (n.isFolder && !includeFolders) return false;
+      const name = caseSensitive ? n.name : n.name.toLowerCase();
+      return exact ? name === needle : name.includes(needle);
+    });
+    sortMatches(matches);
+    countEl.textContent = matches.length.toLocaleString() + " result" + (matches.length === 1 ? "" : "s");
+    hideBatchBar();
+    if (matches.length === 0) {
+      resEl.innerHTML = '<div class="empty">No matching items.</div>';
+      allMatches = []; lastMatches = []; renderedCount = 0;
+      $("tokenMapBar").style.display = "none";
+      $("tokenMap").innerHTML = "";
+      return;
+    }
+    allMatches = matches;
+    renderedCount = 0;
+    resEl.innerHTML = "";
+    $("tokenMap").innerHTML = "";
+    $("tokenMapBtn").classList.remove("active");
+    $("tokenMapBar").style.display = matches.length >= 2 ? "block" : "none";
+    renderPage();
+  }
+}
+
+// Does one path match the current query?
+function pathMatches(name) {
+  const caseSensitive = $("optCase").checked;
+  const exact = $("optExact").checked;
+  const needle = caseSensitive ? curQuery : curQuery.toLowerCase();
+  const hay = caseSensitive ? name : name.toLowerCase();
+  return exact ? hay === needle : hay.indexOf(needle) !== -1;
+}
+
+// Collect the next batch: up to `batchSize` matches from EACH host, resuming
+// from scanCursors. Returns { matches, cursors } (cursors = state AFTER this batch).
+function collectBatch() {
+  const batchSize = Math.max(100, parseInt($("batchSize").value, 10) || 5000);
+  const caseSensitive = $("optCase").checked;
+  const exact = $("optExact").checked;
+  const needle = caseSensitive ? curQuery : curQuery.toLowerCase();
+  const multiHost = hostRanges.length > 1;
+  const matches = [];
+
+  for (let h = 0; h < hostRanges.length; h++) {
+    const hostEnd = hostRanges[h].end;
+    const hostName = hostRanges[h].host;
+    let i = scanCursors[h];
+    let taken = 0;
+    while (i < hostEnd && taken < batchSize) {
       const p = allPaths[i];
       const slash = p.lastIndexOf("/");
       const name = slash >= 0 ? p.slice(slash + 1) : p;
@@ -1007,68 +1134,100 @@ function runSearch() {
           parentPath: slash >= 0 ? p.slice(0, slash) : "",
           isFolder: false,
           _full: p,
-          host: multiHost ? hostForIndex(i) : (hostRanges.length ? hostRanges[0].host : "")
+          host: multiHost ? hostName : (hostRanges.length ? hostRanges[0].host : "")
         });
+        taken++;
       }
+      i++;
     }
-    // Folders aren't distinguished in big mode (would need a prefix index);
-    // filename search rarely targets folders, so this is acceptable.
-  } else {
-    matches = nodes.filter(n => {
-      if (n.isFolder && !includeFolders) return false;
-      const name = caseSensitive ? n.name : n.name.toLowerCase();
-      return exact ? name === needle : name.includes(needle);
+    scanCursors[h] = i;
+  }
+
+  // Exhausted when every host cursor reached its end.
+  batchExhausted = hostRanges.every((hr, h) => scanCursors[h] >= hr.end);
+  sortMatches(matches);
+  return { matches, cursors: scanCursors.slice() };
+}
+
+// Count every match across all hosts (full scan) — only for the optional total.
+function countAllMatches() {
+  const caseSensitive = $("optCase").checked;
+  const exact = $("optExact").checked;
+  const needle = caseSensitive ? curQuery : curQuery.toLowerCase();
+  let count = 0;
+  for (let i = 0; i < allPaths.length; i++) {
+    const p = allPaths[i];
+    const slash = p.lastIndexOf("/");
+    const name = slash >= 0 ? p.slice(slash + 1) : p;
+    const hay = caseSensitive ? name : name.toLowerCase();
+    if (exact ? hay === needle : hay.indexOf(needle) !== -1) count++;
+  }
+  return count;
+}
+
+// Sort a match array in place using the selected order.
+function sortMatches(matches) {
+  const sortBy = $("sortBy").value;
+  if (sortBy === "orig") return;
+  const relPath = n => n.parentPath ? n.parentPath + "/" + n.name : n.name;
+  // Precomputed natural-sort keys + plain compare (~30x faster than localeCompare).
+  const natKey = s => s.toLowerCase().replace(/\d+/g, m => m.length > 10 ? m : m.padStart(10, "0"));
+  let keyed;
+  if (sortBy === "path") {
+    keyed = matches.map(o => ({ k: natKey(relPath(o)), o }));
+  } else if (sortBy === "name") {
+    keyed = matches.map(o => ({ k: natKey(o.name) + "\u0000" + natKey(relPath(o)), o }));
+  } else { // depth
+    keyed = matches.map(o => {
+      const d = o.parentPath ? o.parentPath.split("/").length : 0;
+      return { k: String(d).padStart(4, "0") + "\u0000" + natKey(relPath(o)), o };
     });
   }
+  keyed.sort((a, b) => a.k < b.k ? -1 : a.k > b.k ? 1 : 0);
+  for (let i = 0; i < keyed.length; i++) matches[i] = keyed[i].o;
+}
 
-  const sortBy = $("sortBy").value;
-  const relPath = n => n.parentPath ? n.parentPath + "/" + n.name : n.name;
-
-  // Sorting large result sets: calling localeCompare per comparison is very
-  // slow (2M results ≈ 153s). Instead compute a sort key once per item and
-  // compare plain strings (≈3s). Digit runs are zero-padded so that plain
-  // lexicographic order still gives natural ordering (file2 < file10).
-  const natKey = s => s.toLowerCase().replace(/\d+/g, m => m.length > 10 ? m : m.padStart(10, "0"));
-
-  if (sortBy !== "orig") {
-    let keyed;
-    if (sortBy === "path") {
-      keyed = matches.map(o => ({ k: natKey(relPath(o)), o }));
-    } else if (sortBy === "name") {
-      // name first, then path as tiebreaker — pack both into one key
-      keyed = matches.map(o => ({ k: natKey(o.name) + "\u0000" + natKey(relPath(o)), o }));
-    } else { // "depth": shallower paths first, then path order
-      keyed = matches.map(o => {
-        const d = o.parentPath ? o.parentPath.split("/").length : 0;
-        return { k: String(d).padStart(4, "0") + "\u0000" + natKey(relPath(o)), o };
-      });
-    }
-    keyed.sort((a, b) => a.k < b.k ? -1 : a.k > b.k ? 1 : 0);
-    for (let i = 0; i < keyed.length; i++) matches[i] = keyed[i].o;
-  }
-  // "orig" leaves the scan/filter order untouched.
-
-  countEl.textContent = matches.length.toLocaleString() + " result" + (matches.length === 1 ? "" : "s");
-
-  if (matches.length === 0) {
-    resEl.innerHTML = '<div class="empty">No matching items.</div>';
-    allMatches = []; lastMatches = []; renderedCount = 0;
-    $("tokenMapBar").style.display = "none";
-    $("tokenMap").innerHTML = "";
-    return;
-  }
-
-  // Store full result set and render the first page.
-  allMatches = matches;
-  curQuery = q;
-  curCaseSensitive = caseSensitive;
+// Display a stored batch by index.
+function showBatch(idx) {
+  if (idx < 0 || idx >= batches.length) return;
+  batchIndex = idx;
+  const b = batches[idx];
+  allMatches = b.matches;
   renderedCount = 0;
-  resEl.innerHTML = "";
-  // Reset the relatedness map for the new result set.
+  $("results").innerHTML = "";
   $("tokenMap").innerHTML = "";
   $("tokenMapBtn").classList.remove("active");
-  $("tokenMapBar").style.display = matches.length >= 2 ? "block" : "none";
+  $("tokenMapBar").style.display = allMatches.length >= 2 ? "block" : "none";
   renderPage();
+  updateBatchBar();
+
+  // Count line: batch info, plus the exact total if the user asked for it.
+  const perHost = Math.max(100, parseInt($("batchSize").value, 10) || 5000);
+  let txt = `Batch ${idx + 1} · ${allMatches.length.toLocaleString()} result`
+          + (allMatches.length === 1 ? "" : "s")
+          + (hostRanges.length > 1 ? ` (up to ${perHost.toLocaleString()} per host × ${hostRanges.length} hosts)` : "");
+  if (totalMatchCount !== null) txt += ` · ${totalMatchCount.toLocaleString()} total`;
+  $("resCount").textContent = txt;
+}
+
+function hideBatchBar() {
+  const bar = $("batchBar");
+  if (bar) bar.style.display = "none";
+}
+
+function updateBatchBar() {
+  const bar = $("batchBar");
+  if (!bar) return;
+  if (!bigMode || batches.length === 0) { bar.style.display = "none"; return; }
+  bar.style.display = "flex";
+  $("batchPrev").disabled = batchIndex <= 0;
+  // "Continue" is available if there are more stored batches ahead, or more to scan.
+  const hasNextStored = batchIndex < batches.length - 1;
+  $("batchNext").disabled = !hasNextStored && batchExhausted;
+  $("batchNext").textContent = hasNextStored ? "Next batch →" : "Continue search →";
+  $("batchLabel").textContent = batchExhausted && batchIndex === batches.length - 1
+    ? `Batch ${batchIndex + 1} of ${batches.length} (end)`
+    : `Batch ${batchIndex + 1} of ${batches.length}`;
 }
 
 // Build a single result row element.
