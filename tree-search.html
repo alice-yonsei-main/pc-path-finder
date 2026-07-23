@@ -325,12 +325,9 @@ let lastMatches = []; // currently displayed (sorted, sliced) result set
 let allMatches = [];  // full sorted result set for the current search (for pagination)
 let renderedCount = 0; // how many of allMatches are currently in the DOM
 const PAGE_SIZE = 2000; // results rendered per "show more" click
-// Upper bound on collected matches. Sorting is O(n log n) with expensive
-// locale compares — 500k results take ~6s and 2M take ~24s, which freezes
-// the tab. 50k sorts in well under a second and is far more than anyone
-// scrolls through; beyond this we tell the user to narrow the search.
-const MATCH_CAP = 50000;
-let matchesTruncated = false;
+// No cap on collected matches: sorting uses precomputed natural-sort keys with
+// plain string compare, which is ~30x faster than per-comparison localeCompare
+// (2M results: ~3s instead of ~153s). Rendering stays paginated regardless.
 let curQuery = "", curCaseSensitive = false; // remembered for highlighting on paginate
 
 // Lazy-scan state for large files:
@@ -369,9 +366,9 @@ const $ = id => document.getElementById(id);
 
 /* ================= Google Drive integration ================= */
 // ---- Fill these in after following GOOGLE_DRIVE_SETUP.md ----
-const GDRIVE_API_KEY   = "AIzaSyCHCaeisfEKMegnS_izGUXRhM3DbVvikY0";  // API key (A-4)
-const GDRIVE_CLIENT_ID = "110399583548-3s9pm8e6aktkbam7ofrdaomeedbo4cg7.apps.googleusercontent.com";  // OAuth client ID (A-5)
-const GDRIVE_APP_ID    = "110399583548";  // Project number (A-6)
+const GDRIVE_API_KEY   = "";  // API key (A-4)
+const GDRIVE_CLIENT_ID = "";  // OAuth client ID (A-5)
+const GDRIVE_APP_ID    = "";  // Project number (A-6)
 // ------------------------------------------------------------
 const GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
@@ -992,7 +989,6 @@ function runSearch() {
 
   const needle = caseSensitive ? q : q.toLowerCase();
   let matches;
-  matchesTruncated = false;
 
   if (bigMode) {
     // Lazy scan: walk the path strings, build match objects only for hits.
@@ -1013,10 +1009,6 @@ function runSearch() {
           _full: p,
           host: multiHost ? hostForIndex(i) : (hostRanges.length ? hostRanges[0].host : "")
         });
-        // Safety cap: sorting hundreds of thousands of results freezes the
-        // browser for many seconds (localeCompare is expensive). Nobody scrolls
-        // past this many anyway — narrow the query instead.
-        if (matches.length >= MATCH_CAP) { matchesTruncated = true; break; }
       }
     }
     // Folders aren't distinguished in big mode (would need a prefix index);
@@ -1031,20 +1023,32 @@ function runSearch() {
 
   const sortBy = $("sortBy").value;
   const relPath = n => n.parentPath ? n.parentPath + "/" + n.name : n.name;
-  if (sortBy === "path") {
-    matches.sort((a, b) => relPath(a).localeCompare(relPath(b), undefined, { numeric: true, sensitivity: "base" }));
-  } else if (sortBy === "name") {
-    matches.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
-      || relPath(a).localeCompare(relPath(b), undefined, { numeric: true }));
-  } else if (sortBy === "depth") {
-    const depth = n => n.parentPath ? n.parentPath.split("/").length : 0;
-    matches.sort((a, b) => depth(a) - depth(b)
-      || relPath(a).localeCompare(relPath(b), undefined, { numeric: true }));
+
+  // Sorting large result sets: calling localeCompare per comparison is very
+  // slow (2M results ≈ 153s). Instead compute a sort key once per item and
+  // compare plain strings (≈3s). Digit runs are zero-padded so that plain
+  // lexicographic order still gives natural ordering (file2 < file10).
+  const natKey = s => s.toLowerCase().replace(/\d+/g, m => m.length > 10 ? m : m.padStart(10, "0"));
+
+  if (sortBy !== "orig") {
+    let keyed;
+    if (sortBy === "path") {
+      keyed = matches.map(o => ({ k: natKey(relPath(o)), o }));
+    } else if (sortBy === "name") {
+      // name first, then path as tiebreaker — pack both into one key
+      keyed = matches.map(o => ({ k: natKey(o.name) + "\u0000" + natKey(relPath(o)), o }));
+    } else { // "depth": shallower paths first, then path order
+      keyed = matches.map(o => {
+        const d = o.parentPath ? o.parentPath.split("/").length : 0;
+        return { k: String(d).padStart(4, "0") + "\u0000" + natKey(relPath(o)), o };
+      });
+    }
+    keyed.sort((a, b) => a.k < b.k ? -1 : a.k > b.k ? 1 : 0);
+    for (let i = 0; i < keyed.length; i++) matches[i] = keyed[i].o;
   }
   // "orig" leaves the scan/filter order untouched.
 
-  countEl.textContent = matches.length.toLocaleString() + " result" + (matches.length === 1 ? "" : "s")
-    + (matchesTruncated ? ` (stopped at ${MATCH_CAP.toLocaleString()} — narrow your search for the full set)` : "");
+  countEl.textContent = matches.length.toLocaleString() + " result" + (matches.length === 1 ? "" : "s");
 
   if (matches.length === 0) {
     resEl.innerHTML = '<div class="empty">No matching items.</div>';
