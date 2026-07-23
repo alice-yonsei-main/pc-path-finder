@@ -1166,12 +1166,20 @@ function buildGraph(centerLabel, centerSub, leaves, focusIdx, caption) {
   const rowH = 30;
   const topPad = 30, botPad = 34;
   const height = topPad + n * rowH + botPad;
-  const cx = 150, cy = height / 2;      // center node
-  const leafX = 330;
+  const cy = height / 2;
   const y0 = topPad + rowH / 2;
 
-  // Mono font at 12px ≈ 7.25px per char. Size leaf boxes to the full label (no clipping).
+  // Mono font at 12px ≈ 7.25px per char. Size boxes to the full label (no clipping).
   const charW = 7.25, padX = 12;
+
+  // Center node: width follows the actual label (plus the ▤ icon), and the
+  // sub-label underneath, so long folder names aren't truncated.
+  const centerTextW = (centerLabel.length + 2) * charW + padX * 2;
+  const centerSubW  = centerSub ? centerSub.length * 6.0 + padX * 2 : 0;
+  const centerW = Math.ceil(Math.max(140, centerTextW, centerSubW));
+  const cx = 20 + centerW / 2;              // left margin + half width
+  const leafX = cx + centerW / 2 + 60;      // gap between center and leaves
+
   let maxLeafW = 120;
   leaves.forEach(lf => {
     const iconLen = lf.isFolder ? 2 : 0;
@@ -1179,13 +1187,17 @@ function buildGraph(centerLabel, centerSub, leaves, focusIdx, caption) {
     if (w > maxLeafW) maxLeafW = w;
   });
   const leafW = Math.ceil(maxLeafW);
-  const svgW = leafX + leafW + 16;
+  // The caption sits below the graph and can be much wider than the nodes
+  // (it holds a full absolute path). Widen the SVG to fit it, or it gets
+  // clipped at the right edge.
+  const capW = caption ? caption.length * 6.2 + 24 : 0;  // ~6.2px/char at 11px sans
+  const svgW = Math.ceil(Math.max(leafX + leafW + 16, capW));
 
   let edges = "", boxes = "";
   leaves.forEach((lf, i) => {
     const ly = y0 + i * rowH;
     const focused = i === focusIdx;
-    edges += `<path d="M${cx+70} ${cy} C ${leafX-40} ${cy}, ${leafX-40} ${ly}, ${leafX} ${ly}" fill="none" stroke="${focused ? 'var(--accent)' : 'var(--line)'}" stroke-width="${focused ? 1.4 : 0.7}"/>`;
+    edges += `<path d="M${cx + centerW/2} ${cy} C ${leafX-40} ${cy}, ${leafX-40} ${ly}, ${leafX} ${ly}" fill="none" stroke="${focused ? 'var(--accent)' : 'var(--line)'}" stroke-width="${focused ? 1.4 : 0.7}"/>`;
     const fill = focused ? 'var(--accent-dim)' : (lf.isFolder ? 'rgba(217,164,65,0.14)' : 'var(--panel-2)');
     const stroke = focused ? 'var(--accent)' : 'var(--line)';
     const txtColor = focused ? '#fff' : (lf.isFolder ? 'var(--folder)' : 'var(--text)');
@@ -1196,9 +1208,9 @@ function buildGraph(centerLabel, centerSub, leaves, focusIdx, caption) {
 
   const centerH = centerSub ? 42 : 30;
   const center =
-    `<rect x="${cx-70}" y="${cy-centerH/2}" width="140" height="${centerH}" rx="7" fill="rgba(217,164,65,0.14)" stroke="var(--folder)" stroke-width="0.8"/>`
-    + `<text x="${cx}" y="${centerSub ? cy-3 : cy+4}" text-anchor="middle" fill="var(--folder)" font-family="var(--mono)" font-size="12">▤ ${esvg(clip(centerLabel, 16))}</text>`
-    + (centerSub ? `<text x="${cx}" y="${cy+13}" text-anchor="middle" fill="var(--muted)" font-family="var(--mono)" font-size="10">${esvg(clip(centerSub, 20))}</text>` : "");
+    `<rect x="${cx - centerW/2}" y="${cy-centerH/2}" width="${centerW}" height="${centerH}" rx="7" fill="rgba(217,164,65,0.14)" stroke="var(--folder)" stroke-width="0.8"/>`
+    + `<text x="${cx}" y="${centerSub ? cy-3 : cy+4}" text-anchor="middle" fill="var(--folder)" font-family="var(--mono)" font-size="12">▤ ${esvg(centerLabel)}</text>`
+    + (centerSub ? `<text x="${cx}" y="${cy+13}" text-anchor="middle" fill="var(--muted)" font-family="var(--mono)" font-size="10">${esvg(centerSub)}</text>` : "");
 
   const cap = caption ? `<text x="12" y="${height-12}" fill="var(--muted)" font-family="var(--sans)" font-size="11">${esvg(caption)}</text>` : "";
 
